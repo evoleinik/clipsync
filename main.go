@@ -10,8 +10,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-	"github.com/atotto/clipboard"
 )
 
 const pollInterval = 300 * time.Millisecond
@@ -124,7 +122,7 @@ func runClient(host string, port int) {
 					return
 				default:
 				}
-				text, err := clipboard.ReadAll()
+				text, err := clipboardRead()
 				if err != nil {
 					time.Sleep(pollInterval)
 					continue
@@ -187,7 +185,7 @@ func readMsg(conn net.Conn) (string, error) {
 
 func watchClipboard(onchange func(string)) {
 	for {
-		text, err := clipboard.ReadAll()
+		text, err := clipboardRead()
 		if err != nil {
 			time.Sleep(pollInterval)
 			continue
@@ -226,7 +224,7 @@ func recvClipboard(conn net.Conn, also func(string)) {
 		mu.Lock()
 		lastHash = h
 		mu.Unlock()
-		clipboard.WriteAll(msg)
+		clipboardWrite(msg)
 		if also != nil {
 			also(msg)
 		}
