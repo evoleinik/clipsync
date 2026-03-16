@@ -1,18 +1,26 @@
 package main
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"flag"
 	"fmt"
 	"io"
 	"log"
 	"net"
-	"strings"
 	"sync"
 	"time"
 )
 
-const pollInterval = 300 * time.Millisecond
+const (
+	pollInterval = 300 * time.Millisecond
+	maxMsgSize   = 50 * 1024 * 1024
+)
+
+type ClipboardContent struct {
+	Type byte   // 'T' = text, 'I' = image (PNG)
+	Data []byte
+}
 
 var (
 	lastHash [32]byte
@@ -44,12 +52,12 @@ func runServer(port int) {
 	var clients []net.Conn
 	var clMu sync.Mutex
 
-	broadcast := func(data string, exclude net.Conn) {
+	broadcast := func(content *ClipboardContent, exclude net.Conn) {
 		clMu.Lock()
 		defer clMu.Unlock()
 		for _, c := range clients {
 			if c != exclude {
-				sendMsg(c, data)
+				sendMsg(c, content)
 			}
 		}
 	}
@@ -81,15 +89,15 @@ func runServer(port int) {
 
 			go func(c net.Conn) {
 				defer remove(c)
-				recvClipboard(c, func(data string) {
-					broadcast(data, c)
+				recvClipboard(c, func(content *ClipboardContent) {
+					broadcast(content, c)
 				})
 			}(conn)
 		}
 	}()
 
-	watchClipboard(func(data string) {
-		broadcast(data, nil)
+	watchClipboard(func(content *ClipboardContent) {
+		broadcast(content, nil)
 	})
 }
 
@@ -107,95 +115,92 @@ func runClient(host string, port int) {
 		}
 		log.Println("connected")
 
-		// recv in background; when it returns, connection is dead
 		dead := make(chan struct{})
 		go func() {
 			recvClipboard(conn, nil)
 			close(dead)
 		}()
 
-		// watch clipboard, send until connection dies
-		go func() {
-			for {
-				select {
-				case <-dead:
-					return
-				default:
-				}
-				text, err := clipboardRead()
-				if err != nil {
-					time.Sleep(pollInterval)
-					continue
-				}
-				text = strings.TrimSpace(text)
-				if text == "" {
-					time.Sleep(pollInterval)
-					continue
-				}
-				h := sha256.Sum256([]byte(text))
-				mu.Lock()
-				changed := h != lastHash
-				if changed {
-					lastHash = h
-				}
-				mu.Unlock()
-				if changed {
-					sendMsg(conn, text)
-				}
-				time.Sleep(pollInterval)
-			}
-		}()
+		watchClipboardUntil(dead, func(content *ClipboardContent) {
+			sendMsg(conn, content)
+		})
 
-		<-dead
 		conn.Close()
 		log.Println("disconnected, reconnecting in 3s...")
 		time.Sleep(3 * time.Second)
 	}
 }
 
-// --- protocol: length-prefixed messages ---
+// --- protocol: length-prefixed messages with type byte ---
+// Wire format: [10-byte length][1-byte type][payload]
+// Length = payload size only (excludes type byte)
 
-func sendMsg(conn net.Conn, data string) {
-	msg := []byte(data)
-	header := fmt.Sprintf("%010d", len(msg))
-	conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
-	if _, err := conn.Write(append([]byte(header), msg...)); err != nil {
+func sendMsg(conn net.Conn, content *ClipboardContent) {
+	header := fmt.Sprintf("%010d%c", len(content.Data), content.Type)
+	deadline := time.Duration(len(content.Data)/(1024*1024)+5) * time.Second
+	conn.SetWriteDeadline(time.Now().Add(deadline))
+	bufs := net.Buffers{[]byte(header), content.Data}
+	if _, err := bufs.WriteTo(conn); err != nil {
 		log.Printf("send error: %v", err)
 	}
 }
 
-func readMsg(conn net.Conn) (string, error) {
+func readMsg(conn net.Conn) (*ClipboardContent, error) {
 	header := make([]byte, 10)
 	if _, err := io.ReadFull(conn, header); err != nil {
-		return "", err
+		return nil, err
 	}
 	var length int
 	fmt.Sscanf(string(header), "%d", &length)
-	if length > 10*1024*1024 {
-		return "", fmt.Errorf("message too large: %d", length)
+	if length > maxMsgSize {
+		return nil, fmt.Errorf("message too large: %d", length)
+	}
+	typeBuf := make([]byte, 1)
+	if _, err := io.ReadFull(conn, typeBuf); err != nil {
+		return nil, err
+	}
+	if typeBuf[0] != 'T' && typeBuf[0] != 'I' {
+		return nil, fmt.Errorf("unknown message type: %c", typeBuf[0])
 	}
 	body := make([]byte, length)
 	if _, err := io.ReadFull(conn, body); err != nil {
-		return "", err
+		return nil, err
 	}
-	return string(body), nil
+	return &ClipboardContent{Type: typeBuf[0], Data: body}, nil
 }
 
 // --- clipboard ---
 
-func watchClipboard(onchange func(string)) {
+func watchClipboard(onchange func(*ClipboardContent)) {
+	watchClipboardUntil(nil, onchange)
+}
+
+func watchClipboardUntil(done <-chan struct{}, onchange func(*ClipboardContent)) {
 	for {
-		text, err := clipboardRead()
+		if done != nil {
+			select {
+			case <-done:
+				return
+			default:
+			}
+		}
+		content, err := clipboardRead()
 		if err != nil {
 			time.Sleep(pollInterval)
 			continue
 		}
-		text = strings.TrimSpace(text)
-		if text == "" {
+		if content == nil {
 			time.Sleep(pollInterval)
 			continue
 		}
-		h := sha256.Sum256([]byte(text))
+		if content.Type == 'T' {
+			content.Data = bytes.TrimSpace(content.Data)
+			if len(content.Data) == 0 {
+				time.Sleep(pollInterval)
+				continue
+			}
+		}
+		h := sha256.Sum256(content.Data)
 		mu.Lock()
 		changed := h != lastHash
 		if changed {
@@ -203,30 +208,34 @@ func watchClipboard(onchange func(string)) {
 		}
 		mu.Unlock()
 		if changed && onchange != nil {
-			onchange(text)
+			onchange(content)
 		}
 		time.Sleep(pollInterval)
 	}
 }
 
-func recvClipboard(conn net.Conn, also func(string)) {
+func recvClipboard(conn net.Conn, also func(*ClipboardContent)) {
 	for {
-		msg, err := readMsg(conn)
+		content, err := readMsg(conn)
 		if err != nil {
 			log.Printf("connection lost: %v", err)
 			return
 		}
-		msg = strings.TrimSpace(msg)
-		if msg == "" {
-			continue
+		if content.Type == 'T' {
+			content.Data = bytes.TrimSpace(content.Data)
+			if len(content.Data) == 0 {
+				continue
+			}
 		}
-		h := sha256.Sum256([]byte(msg))
+		h := sha256.Sum256(content.Data)
 		mu.Lock()
 		lastHash = h
 		mu.Unlock()
-		clipboardWrite(msg)
+		if err := clipboardWrite(content); err != nil {
+			log.Printf("clipboard write error: %v", err)
+		}
 		if also != nil {
-			also(msg)
+			also(content)
 		}
 	}
 }

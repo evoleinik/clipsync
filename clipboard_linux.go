@@ -1,26 +1,30 @@
 package main
 
 import (
+	"log"
 	"os"
 	"os/exec"
 )
 
-func clipboardRead() (string, error) {
+func clipboardRead() (*ClipboardContent, error) {
+	var out []byte
+	var err error
 	if os.Getenv("WAYLAND_DISPLAY") != "" {
-		out, err := exec.Command("wl-paste", "--no-newline").Output()
-		if err != nil {
-			return "", err
-		}
-		return string(out), nil
+		out, err = exec.Command("wl-paste", "--no-newline").Output()
+	} else {
+		out, err = exec.Command("xclip", "-out", "-selection", "clipboard", "-target", "UTF8_STRING").Output()
 	}
-	out, err := exec.Command("xclip", "-out", "-selection", "clipboard", "-target", "UTF8_STRING").Output()
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-	return string(out), nil
+	return &ClipboardContent{Type: 'T', Data: out}, nil
 }
 
-func clipboardWrite(text string) error {
+func clipboardWrite(content *ClipboardContent) error {
+	if content.Type == 'I' {
+		log.Println("image clipboard not supported on Linux, skipping")
+		return nil
+	}
 	var cmd *exec.Cmd
 	if os.Getenv("WAYLAND_DISPLAY") != "" {
 		cmd = exec.Command("wl-copy")
@@ -34,7 +38,7 @@ func clipboardWrite(text string) error {
 	if err := cmd.Start(); err != nil {
 		return err
 	}
-	if _, err := in.Write([]byte(text)); err != nil {
+	if _, err := in.Write(content.Data); err != nil {
 		return err
 	}
 	if err := in.Close(); err != nil {

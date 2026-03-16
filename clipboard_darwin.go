@@ -1,35 +1,54 @@
 package main
 
-import "os/exec"
+/*
+#cgo LDFLAGS: -framework AppKit
+extern int clipChangeCount();
+extern int clipRead(void** data, int* len);
+extern void clipWriteText(const void* data, int len);
+extern void clipWriteImage(const void* data, int len);
+extern void clipFree(void* data);
+*/
+import "C"
+import (
+	"sync/atomic"
+	"unsafe"
+)
 
-func pbCmd(name string) *exec.Cmd {
-	cmd := exec.Command(name)
-	cmd.Env = []string{"LANG=en_US.UTF-8"}
-	return cmd
+var lastChangeCount atomic.Int32
+
+func clipboardRead() (*ClipboardContent, error) {
+	count := C.clipChangeCount()
+	if C.int(lastChangeCount.Load()) == count {
+		return nil, nil
+	}
+	lastChangeCount.Store(int32(count))
+
+	var data unsafe.Pointer
+	var length C.int
+	typ := C.clipRead(&data, &length)
+	if typ == 0 {
+		return nil, nil
+	}
+	defer C.clipFree(data)
+
+	goData := C.GoBytes(data, length)
+	return &ClipboardContent{Type: byte(typ), Data: goData}, nil
 }
 
-func clipboardRead() (string, error) {
-	out, err := pbCmd("pbpaste").Output()
-	if err != nil {
-		return "", err
+func clipboardWrite(content *ClipboardContent) error {
+	if len(content.Data) == 0 {
+		return nil
 	}
-	return string(out), nil
-}
+	data := unsafe.Pointer(&content.Data[0])
+	length := C.int(len(content.Data))
 
-func clipboardWrite(text string) error {
-	cmd := pbCmd("pbcopy")
-	in, err := cmd.StdinPipe()
-	if err != nil {
-		return err
+	switch content.Type {
+	case 'I':
+		C.clipWriteImage(data, length)
+	default:
+		C.clipWriteText(data, length)
 	}
-	if err := cmd.Start(); err != nil {
-		return err
-	}
-	if _, err := in.Write([]byte(text)); err != nil {
-		return err
-	}
-	if err := in.Close(); err != nil {
-		return err
-	}
-	return cmd.Wait()
+
+	lastChangeCount.Store(int32(C.clipChangeCount()))
+	return nil
 }

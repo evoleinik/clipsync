@@ -1,8 +1,8 @@
 # clipsync
 
-Clipboard sync over TCP. One binary, one dependency, zero config.
+Clipboard sync over TCP. Zero dependencies, zero config.
 
-Copy on one machine, paste on another. Built for Tailscale — stable IPs mean no discovery protocol needed. Works on any network where machines can reach each other.
+Copy text or screenshots on one machine, paste on another. Built for Tailscale — stable IPs mean no discovery protocol needed. Works on any network where machines can reach each other.
 
 ## Why not X?
 
@@ -13,15 +13,17 @@ Copy on one machine, paste on another. Built for Tailscale — stable IPs mean n
 | clipboard-sync | 30+ deps (Fyne GUI framework) for a tray icon |
 | ClipCascade | Requires Docker |
 
-clipsync: 150 lines of Go, one dependency (`atotto/clipboard`), fixed port.
+clipsync: ~200 lines of Go, zero external dependencies, fixed port. Uses CGo + AppKit on macOS for native clipboard access.
 
 ## Install
 
+Requires Xcode command-line tools (for CGo/AppKit):
+
 ```
-go install github.com/evoleinik/clipsync@latest
+xcode-select --install
 ```
 
-Or build from source:
+Build from source:
 
 ```
 git clone https://github.com/evoleinik/clipsync.git
@@ -82,14 +84,16 @@ Client — same, but add the server hostname to `ProgramArguments`.
 
 - Server listens on a fixed TCP port
 - Clients connect and stay connected
-- Both sides poll the clipboard every 300ms
-- Changes are broadcast as length-prefixed messages
+- Clipboard access via NSPasteboard (macOS) — uses `changeCount` for efficient change detection
+- Changes are broadcast as type-prefixed, length-prefixed messages (`T` for text, `I` for image)
+- Images (PNG, TIFF screenshots) are auto-converted to PNG for transfer
 - Client auto-reconnects on disconnect (3s retry)
 - SHA-256 dedup prevents echo loops
 
 ## Limitations
 
-- Text only (no images/files — covers 99% of clipboard use)
+- Text and PNG images only (no files or rich text)
+- Image support is macOS only (Linux nodes sync text, skip received images)
 - No encryption (use Tailscale or SSH tunnel for untrusted networks)
 - Polls at 300ms (not event-driven — keeps the code simple)
 
