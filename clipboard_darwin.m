@@ -14,7 +14,19 @@ int clipRead(void** outData, int* outLen) {
     @autoreleasepool {
         NSPasteboard* pb = [NSPasteboard generalPasteboard];
 
-        // PNG first
+        // Text first — rich web copies (e.g. Google Calendar) put both text
+        // and an image on the pasteboard; the user almost always wants text.
+        NSString* str = [pb stringForType:NSPasteboardTypeString];
+        if (str != nil && [str length] > 0) {
+            const char* utf8 = [str UTF8String];
+            int slen = (int)strlen(utf8);
+            *outData = malloc(slen);
+            memcpy(*outData, utf8, slen);
+            *outLen = slen;
+            return 'T';
+        }
+
+        // PNG
         NSData* png = [pb dataForType:NSPasteboardTypePNG];
         if (png != nil && [png length] > 0) {
             *outLen = (int)[png length];
@@ -36,17 +48,6 @@ int clipRead(void** outData, int* outLen) {
                     return 'I';
                 }
             }
-        }
-
-        // Plain text
-        NSString* str = [pb stringForType:NSPasteboardTypeString];
-        if (str != nil && [str length] > 0) {
-            const char* utf8 = [str UTF8String];
-            int slen = (int)strlen(utf8);
-            *outData = malloc(slen);
-            memcpy(*outData, utf8, slen);
-            *outLen = slen;
-            return 'T';
         }
 
         return 0;

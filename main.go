@@ -82,6 +82,7 @@ func runServer(port int) {
 				log.Println(err)
 				continue
 			}
+			enableKeepAlive(conn)
 			log.Printf("connected: %s", conn.RemoteAddr())
 			clMu.Lock()
 			clients = append(clients, conn)
@@ -113,6 +114,7 @@ func runClient(host string, port int) {
 			time.Sleep(3 * time.Second)
 			continue
 		}
+		enableKeepAlive(conn)
 		log.Println("connected")
 
 		dead := make(chan struct{})
@@ -128,6 +130,15 @@ func runClient(host string, port int) {
 		conn.Close()
 		log.Println("disconnected, reconnecting in 3s...")
 		time.Sleep(3 * time.Second)
+	}
+}
+
+// enableKeepAlive turns on TCP keepalive with a short idle so NAT/Tailscale
+// doesn't silently drop the connection mid-session and lose clipboard updates.
+func enableKeepAlive(conn net.Conn) {
+	if tc, ok := conn.(*net.TCPConn); ok {
+		tc.SetKeepAlive(true)
+		tc.SetKeepAlivePeriod(30 * time.Second)
 	}
 }
 
