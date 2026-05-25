@@ -117,6 +117,17 @@ func runClient(host string, port int) {
 		enableKeepAlive(conn)
 		log.Println("connected")
 
+		// Push current clipboard so anything copied during the prior
+		// disconnect (or silently lost when the last connection RST'd
+		// mid-frame) reaches the server. Without this, sends that returned
+		// success into a dying TCP buffer are gone forever — lastHash on
+		// this side already advanced, so watchClipboard won't retry.
+		if content, err := clipboardRead(); err == nil && content != nil {
+			if content.Type != 'T' || len(bytes.TrimSpace(content.Data)) > 0 {
+				sendMsg(conn, content)
+			}
+		}
+
 		dead := make(chan struct{})
 		go func() {
 			recvClipboard(conn, nil)
