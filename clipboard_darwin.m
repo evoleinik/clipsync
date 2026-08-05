@@ -54,23 +54,30 @@ int clipRead(void** outData, int* outLen) {
     }
 }
 
-void clipWriteText(const void* data, int len) {
+// Returns the changeCount produced by THIS write. clearContents() reports the
+// post-write count and setString/setData do not bump it further (verified on
+// macOS), so the caller can record our own write without re-reading
+// changeCount afterwards -- a re-read would pick up a copy the user made in
+// between and silently swallow it forever.
+int clipWriteText(const void* data, int len) {
     @autoreleasepool {
         NSPasteboard* pb = [NSPasteboard generalPasteboard];
-        [pb clearContents];
+        int count = (int)[pb clearContents];
         NSString* str = [[NSString alloc] initWithBytes:data length:len encoding:NSUTF8StringEncoding];
         if (str != nil) {
             [pb setString:str forType:NSPasteboardTypeString];
         }
+        return count;
     }
 }
 
-void clipWriteImage(const void* data, int len) {
+int clipWriteImage(const void* data, int len) {
     @autoreleasepool {
         NSPasteboard* pb = [NSPasteboard generalPasteboard];
-        [pb clearContents];
+        int count = (int)[pb clearContents];
         NSData* imgData = [NSData dataWithBytes:data length:len];
         [pb setData:imgData forType:NSPasteboardTypePNG];
+        return count;
     }
 }
 
