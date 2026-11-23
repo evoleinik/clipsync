@@ -21,8 +21,21 @@ const (
 	maxMsgSize   = 50 * 1024 * 1024
 )
 
+// Peers exchange a heartbeat every heartbeatInterval and treat a link with no
+// traffic at all for readTimeout as dead. Kernel TCP keepalive used to be the
+// only liveness check and it failed badly in practice: when the Tailscale path
+// dropped, the server gave up after ~3 min while the client went on believing
+// the socket was live for up to 15 more, so copies made in that window reached
+// the peer only at the next reconnect. Constant traffic also stops an idle NAT
+// mapping being reaped in the first place. Vars, not consts, so tests can
+// shrink them.
+var (
+	heartbeatInterval = 15 * time.Second
+	readTimeout       = 45 * time.Second
+)
+
 type ClipboardContent struct {
-	Type byte   // 'T' = text, 'I' = image (PNG)
+	Type byte // 'T' = text, 'I' = image (PNG), 'P' = heartbeat
 	Data []byte
 	Ts   int64 // origin unix-nano; used for last-writer-wins conflict resolution
 }
@@ -194,8 +207,10 @@ func runServer(port int) {
 		}
 	}()
 
-	watchClipboard(func(content *ClipboardContent) {
+	watchClipboardUntil(nil, func(content *ClipboardContent) {
 		broadcast(content, nil)
+	}, func() {
+		broadcast(pingMsg(), nil)
 	})
 }
 
@@ -232,6 +247,8 @@ func runClient(host string, port int) {
 
 		watchClipboardUntil(dead, func(content *ClipboardContent) {
 			sendMsg(conn, content)
+		}, func() {
+			sendMsg(conn, pingMsg())
 		})
 
 		conn.Close()
@@ -252,13 +269,24 @@ func enableKeepAlive(conn net.Conn) {
 // --- protocol: length-prefixed messages with type byte + timestamp ---
 // Wire format: [10-byte length][1-byte type][8-byte big-endian unix-nano ts][payload]
 // Length = payload size only (excludes type + ts bytes)
+// Types: T = text, I = PNG image, P = heartbeat (empty payload)
+
+// bodyDeadline budgets a transfer by size: 5s, plus a second per MB.
+func bodyDeadline(n int) time.Duration {
+	return time.Duration(n/(1024*1024)+5) * time.Second
+}
+
+// pingMsg carries no clipboard content; its only job is to prove this side is
+// alive before the peer(s) read deadline expires.
+func pingMsg() *ClipboardContent {
+	return &ClipboardContent{Type: 'P'}
+}
 
 func sendMsg(conn net.Conn, content *ClipboardContent) {
 	header := fmt.Sprintf("%010d%c", len(content.Data), content.Type)
 	var ts [8]byte
 	binary.BigEndian.PutUint64(ts[:], uint64(content.Ts))
-	deadline := time.Duration(len(content.Data)/(1024*1024)+5) * time.Second
-	conn.SetWriteDeadline(time.Now().Add(deadline))
+	conn.SetWriteDeadline(time.Now().Add(bodyDeadline(len(content.Data))))
 	bufs := net.Buffers{[]byte(header), ts[:], content.Data}
 	if _, err := bufs.WriteTo(conn); err != nil {
 		log.Printf("send error: %v", err)
@@ -266,6 +294,10 @@ func sendMsg(conn net.Conn, content *ClipboardContent) {
 }
 
 func readMsg(conn net.Conn) (*ClipboardContent, error) {
+	// Idle deadline. Without it a peer whose path has died silently is waited
+	// on forever: the read never returns, so neither side tears the connection
+	// down and clipboard updates stop crossing with nothing logged.
+	conn.SetReadDeadline(time.Now().Add(readTimeout))
 	header := make([]byte, 10)
 	if _, err := io.ReadFull(conn, header); err != nil {
 		return nil, err
@@ -279,7 +311,7 @@ func readMsg(conn net.Conn) (*ClipboardContent, error) {
 	if _, err := io.ReadFull(conn, typeBuf); err != nil {
 		return nil, err
 	}
-	if typeBuf[0] != 'T' && typeBuf[0] != 'I' {
+	if typeBuf[0] != 'T' && typeBuf[0] != 'I' && typeBuf[0] != 'P' {
 		return nil, fmt.Errorf("unknown message type: %c", typeBuf[0])
 	}
 	tsBuf := make([]byte, 8)
@@ -287,6 +319,9 @@ func readMsg(conn net.Conn) (*ClipboardContent, error) {
 		return nil, err
 	}
 	ts := int64(binary.BigEndian.Uint64(tsBuf))
+	// A large body legitimately outlasts the idle deadline, so re-budget it by
+	// size once the header tells us how big it is.
+	conn.SetReadDeadline(time.Now().Add(bodyDeadline(length)))
 	body := make([]byte, length)
 	if _, err := io.ReadFull(conn, body); err != nil {
 		return nil, err
@@ -296,11 +331,12 @@ func readMsg(conn net.Conn) (*ClipboardContent, error) {
 
 // --- clipboard ---
 
-func watchClipboard(onchange func(*ClipboardContent)) {
-	watchClipboardUntil(nil, onchange)
-}
-
-func watchClipboardUntil(done <-chan struct{}, onchange func(*ClipboardContent)) {
+// watchClipboardUntil polls the clipboard and, every heartbeatInterval, calls
+// tick -- this side(s) proof of life for the peer. tick fires at the TOP of
+// the loop because the several "nothing to sync" continues below would
+// otherwise starve it and the peer would time us out on a healthy link.
+func watchClipboardUntil(done <-chan struct{}, onchange func(*ClipboardContent), tick func()) {
+	lastTick := time.Now()
 	for {
 		if done != nil {
 			select {
@@ -308,6 +344,10 @@ func watchClipboardUntil(done <-chan struct{}, onchange func(*ClipboardContent))
 				return
 			default:
 			}
+		}
+		if tick != nil && time.Since(lastTick) >= heartbeatInterval {
+			tick()
+			lastTick = time.Now()
 		}
 		content, err := clipboardRead()
 		if err != nil {
@@ -350,6 +390,9 @@ func recvClipboard(conn net.Conn, also func(*ClipboardContent)) {
 		if err != nil {
 			log.Printf("connection lost: %v", err)
 			return
+		}
+		if content.Type == 'P' {
+			continue // heartbeat: proof of life only, nothing to sync
 		}
 		if content.Type == 'T' {
 			content.Data = bytes.TrimSpace(content.Data)

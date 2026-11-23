@@ -87,11 +87,14 @@ Client — same, but add the server hostname to `ProgramArguments`.
 - Clipboard access via NSPasteboard (macOS) — uses `changeCount` for efficient change detection
 - Changes are broadcast as type-prefixed, length-prefixed messages (`T` for text, `I` for image)
 - Images (PNG, TIFF screenshots) are auto-converted to PNG for transfer
+- Peers send a heartbeat (`P`) every 15s and drop a link that is silent for 45s, so a dead Tailscale path is noticed within a minute
 - Client auto-reconnects on disconnect (3s retry)
+- Conflicts are settled by the copy timestamp, so both machines need correct clocks. A peer whose clock is behind loses copies made just after the other side copied
 - SHA-256 dedup prevents echo loops
 
 ## Limitations
 
+- Both peers must run a build with heartbeats. An older peer rejects the `P` message and the link drops every 15s
 - Text and PNG images only (no files or rich text)
 - Image support is macOS only (Linux nodes sync text, skip received images)
 - No encryption (use Tailscale or SSH tunnel for untrusted networks)
